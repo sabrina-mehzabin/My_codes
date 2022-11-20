@@ -1,0 +1,31 @@
+dir.create("~/Trials")
+setwd("~/Trials")
+options(repos ="http://cran.r-project.org")  # required to get latest libs
+if (!require("pacman")) install.packages("pacman")
+install.packages("EcoHydRology", repos="http://R-Forge.R-project.org")
+pacman::p_load(devtools,terra)
+devtools::install_github("ropensci/FedData")
+pacman::p_load(lubridate,aqp,curl,httr,rnoaa,raster,shapefiles,
+               rgdal,elevatr,soilDB,circlize,topmodel,DEoptim,
+               FedData,raster,EcoHydRology,ggplot2,data.table)
+
+# LITTLE OTTER CK AT MONKTON RD, NR FERRISBURGH, VT
+myflowgage_id="04282629"
+myflowgage=get_usgs_gage(myflowgage_id,begin_date = "2010-01-01",
+                         end_date = "2022-06-01")
+
+# We want Q in mm/day for the basin
+myflowgage$flowdata$Qmm = myflowgage$flowdata$flow/myflowgage$area/10^3
+
+#
+# But, we are going to build on last weeks lab separating out 
+declat=myflowgage$declat
+declon=myflowgage$declon
+WXData=FillMissWX(declat, declon,30,
+                  date_min="2010-01-01",
+                  date_max="2022-06-01")
+#modeldata=merge(WXData,myflowgage$flowdata,by.x="date",by.y="mdate")
+
+
+setDT(WXData)
+write.csv(WXData,"Weather.csv", row.names = TRUE)
