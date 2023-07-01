@@ -1,0 +1,93 @@
+install.packages("ncdf4")
+install.packages("tidyverse")
+library(ncdf4)
+library(tidyverse)
+install.packages("lubridate")                # Install lubridate package
+library("lubridate") 
+
+our_nc_data <- nc_open("D:/CMIP6/pr_day_EC-Earth3-CC_historical_2014.nc")
+print(our_nc_data)
+
+attributes(our_nc_data$var)
+attributes(our_nc_data$dim)
+# Get latitude and longitude with the ncvar_get function and store each into their own object:
+lat <- ncvar_get(our_nc_data, "lat")
+nlat <- dim(lat) #to check it matches the metadata: 256L
+lon <- ncvar_get(our_nc_data, "lon")
+nlon <- dim(lon) #to check, should be 512L
+# Check your lat lon dimensions match the information in the metadata we explored before:
+print(c(nlon, nlat))
+# Get the time variable. Remember: our metadata said our time units are in days since 1850-01-01 00:00:00, so you will not see a recognizable date and time format, but a big number like "457185600". We will take care of this later
+time <- ncvar_get(our_nc_data, "time")
+head(time) # just to have a look at the numbers
+tunits <- ncatt_get(our_nc_data, "time", "units") #check units
+nt <- dim(time) #should be 365L
+
+#get the variable in "matrix slices". vt is for my study area Vermont
+vt_array <- ncvar_get(our_nc_data, "pr") 
+
+#_FillValue is how a missing value is represented. 
+#We will need to change it later to the “NA” that R recognizes as missing values.
+
+fillvalue <- ncatt_get(our_nc_data, "pr", "_FillValue")
+dim(vt_array) #to check; this should give you 512 256 365
+#right away let's replace the nc FillValues with NAs
+vt_array[vt_array==fillvalue$value] <- NA
+vt_array
+
+readdata <-data.frame(vt_array)
+
+print(time)
+
+
+time_origin <- as.POSIXct("1850-01-01", tz = "GMT")
+time_obs <- time_origin + as.difftime(time, unit = "days")
+length(time_obs) #should be 365
+range(time_obs)
+
+#You can print different individual slices with the following code, where the information within brackets should be: [lon, lat, slice] and slice is a number between 1 and 365 (the size of your time variable, in other words, the number of days in your dataset).
+
+vt_slice <- vt_array[ , , 212] 
+image(lon, lat, vt_slice)
+
+#Create 2D matrix of long, lat and time
+lonlattime <- as.matrix(expand.grid(lon,lat,time_obs)) # this might take several seconds
+#reshape whole vt_array
+vt_vec_long <- as.vector(vt_array)
+length(vt_vec_long) # by now it should be 47841280
+#Create data.frame
+vt_obs <- data.frame(cbind(lonlattime, vt_vec_long))
+
+head(vt_obs)
+colnames(vt_obs) <- c("Long", "Lat", "Time" ,"Precipitation")
+
+head(vt_obs)
+
+# Bold move time: remove all rows with NA in LSWT_Kelvin:
+vt_final <- na.omit(vt_obs)
+
+dim(vt_obs)
+# 47841280  4
+dim(vt_final)
+# 47841280  4
+#No missing value
+
+# remove lat & long columns
+vt_final <- vt_final[-c(1:2)]
+vt_final
+
+vt_final$Time <- as.Date(vt_final$Time)
+vt_final$Precipitation <- as.double(vt_final$Precipitation)
+
+vt_final <- vt_final %>%
+  group_by(Time) %>%
+  summarize(mean_pr = mean(Precipitation))
+vt_final
+dim(vt_final)
+
+#in case of temp data extraction, do the following to change unit into degree C
+#vt_C <- vt_final %>%
+#mutate(vt_C = mean_tmp-273.15)
+
+# save as csv 
+write.csv(as.data.frame(vt_final), "testcmip6.csv", row.names=T)
