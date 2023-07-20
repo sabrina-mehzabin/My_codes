@@ -5,7 +5,7 @@ library(tidyverse)
 install.packages("lubridate")                # Install lubridate package
 library("lubridate") 
 
-our_nc_data <- nc_open("D:/CMIP6/pr_day_EC-Earth3-CC_historical_2014.nc")
+our_nc_data <- nc_open("D:/CMIP6/pr_day_EC-Earth3-CC_historical_2014.nc") #put your filepath
 print(our_nc_data)
 
 attributes(our_nc_data$var)
