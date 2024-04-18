@@ -1,0 +1,189 @@
+setwd("~/LOC_Watershed/calib_vsa4/TxtInOut/calib202404151132")
+out_Calib_Tflo <- readSWAT("rch")
+output_rch_1 = out_Calib_Tflo[out_Calib_Tflo$RCH==1,]
+out_Calib_Tflo_sub <- readSWAT("sub")
+output_sub_1 = out_Calib_Tflo_sub[out_Calib_Tflo_sub$SUB==1,]
+
+mergeddataframe = merge(flowgage$flowdata,output_rch_1, all=F)
+NS = NSeff(mergeddataframe$flowcms, mergeddataframe$FLOW_OUTcms)
+
+library(ggplot2)
+#data=as.data.frame(out_Calib_Tflo[1])
+ggplot(data=mergeddataframe ,aes()) +
+  geom_line(aes(x=mdate,y=FLOW_OUTcms, color="Model"),lty = 73) +
+  geom_line(aes(x=mdate,y=flowcms,color="Obs"), lty = 22)+
+  
+  xlab(NULL)+
+  ylab("Flow (m3/s)") +
+  labs(title = paste0("NSE = ", round(as.numeric(NS),2), sep=" ")) +
+  scale_color_manual(values = c("Obs"="black","Model"= "blue"))+
+  theme_classic()
+#############################
+
+
+streamflow_observed <- mergeddataframe$flowcms
+streamflow_calibrated <- mergeddataframe$FLOW_OUTcms
+#summary(streamflow)
+#streamflow=streamflow$streamflow
+runoff_observed <- BaseflowSeparation(streamflow_observed, filter_parameter = 0.925, passes = 3)
+runoff_calibrated <- BaseflowSeparation(streamflow_calibrated, filter_parameter = 0.925, passes = 3)
+mergeddataframe$`Observed_baseflow` <- runoff_observed[, 1]
+mergeddataframe$`Calibrated_baseflow` <- runoff_calibrated[, 1]
+baseflow_nse <- NSeff(mergeddataframe$Calibrated_baseflow, mergeddataframe$Observed_baseflow)
+
+ggplot(mergeddataframe, aes(x = mdate)) +
+  geom_line(aes(y = Observed_baseflow, color = "Observed")) +
+  geom_line(aes(y = Calibrated_baseflow, color = "Calibrated")) +
+  labs(
+    x = "Date",
+    y = "Flow (m3/s)",
+    color = "Legend",
+    title = paste0("Baseflow comparison, NSE = ", round(as.numeric(baseflow_nse), 2))
+  ) +
+  scale_color_manual(
+    values = c("Observed" = "green", "Calibrated" = "purple")
+  ) +
+  theme_minimal()
+
+
+###########################
+
+# params_to_change <- c("GW_DELAY", "ALPHA_BF")
+# values_to_change <- c(1.2, 0.8)
+# 
+# for(i in 1:length(params_to_change)){
+#   row_to_change <- which(Best_Parameter_Tflow2023_11_08$Params == params_to_change[i])
+#   Best_Parameter_Tflow2023_11_08$bestmem[row_to_change] <- values_to_change[i]
+# }
+
+#############################
+
+###calculate PBIAS###
+
+observed <- mergeddataframe$flowcms
+calibrated <- mergeddataframe$FLOW_OUTcms
+
+calculate_PBIAS <- function(observed, simulated) {
+  # Check if the lengths of observed and simulated data are equal
+  if (length(observed) != length(simulated)) {
+    stop("The observed and simulated data must be the same length")
+  }
+  
+  # Calculate the sum of the differences between observed and simulated data
+  sum_diff <- sum(observed - simulated)
+  
+  # Calculate the sum of the observed data
+  sum_obs <- sum(observed)
+  
+  # Calculate PBIAS
+  PBIAS <- (sum_diff / sum_obs) * 100
+  
+  # Return the PBIAS value
+  return(PBIAS)
+}
+
+# Call the function with your observed and calibrated data
+PBIAS_result <- calculate_PBIAS(observed, calibrated)
+
+# Print the PBIAS result
+print(PBIAS_result)
+
+# Fit a linear model
+lmmodel <- lm(calibrated ~ observed)
+
+# Get the summary of the model
+model_summary <- summary(lmmodel)
+
+# Extract R-squared value
+r_squared <- model_summary$r.squared
+
+print(r_squared)
+
+############################################################################
+
+###---------------------------------Plot Snow Depth Modeled vs Measured -------------------
+source("~/swat_LOC/R/readswat_2.R")
+output_hru <- readSWAT("hru")
+output_hru_S01H08 <- output_hru %>% filter(SUB==1 ) %>% filter(HRU == 8)
+
+snow_compare = merge(snowdf, output_hru_S01H08,  by.x = "date",by.y="mdate")
+#plot(snow_compare$SNOmm,snow_compare$snowWateq)
+snow_nse <- NSeff(snow_compare$snowWateq, snow_compare$SNOmm)
+ggplot(snow_compare, aes(x = date)) +
+  geom_line(aes(y = SNOmm, color = "Calibrated")) +
+  geom_line(aes(y = snowWateq, color = "Observed")) +
+  labs(
+    x = "Date",
+    y = "Depth (mm)",
+    color = "Legend",
+    title = paste0("Snow comparison, NSE = ", round(as.numeric(snow_nse), 2))
+  ) +
+  scale_color_manual(
+    values = c("Observed" = "magenta", "Calibrated" = "blue")
+  ) +
+  theme_minimal()
+
+#####snow with temp########
+
+# Assuming the MaxTemp values are on a scale that is roughly similar to the snow depth,
+# otherwise, you would need to adjust the transformation in sec_axis()
+snow_compare$avg_temp <- ((snow_compare$MaxTemp+snow_compare$MinTemp)/2)
+#snow_nse <- NSE(snow_compare$snowWateq, snow_compare$SNOmm)
+#print(snow_nse)
+ggplot(snow_compare, aes(x = date)) +
+  #geom_line(aes(y = SNOmm, color = "Calibrated")) +
+  #geom_line(aes(y = snowWateq, color = "Observed")) +
+  geom_line(aes(y = SNOMELTmm, color = "snowmelt")) +
+  geom_line(aes(y = ETmm, color = "ET")) +
+  #geom_line(aes(y = avg_temp, color = "Avg Temperature"), linetype = "dotted")+
+  geom_line(aes(y = PRECIPmm, color = "Precipitation"), linetype = "dotted")+
+  scale_y_continuous(
+    name = "Depth (mm)",
+    #sec.axis = sec_axis(~ ., name = "Max Temperature (°C)")
+  ) +
+  labs(
+    x = "Date",
+    y = "Depth (mm)",
+    color = "Legend",
+    title = paste0("Snow comparison, NSE = ", round(as.numeric(snow_nse), 2))
+  ) +
+  scale_color_manual(
+    values = c("Observed" = "magenta", "Calibrated" = "blue", "snowmelt" = "green","ET"="orange", "Avg temp"="grey", "Precipitation"="red")
+  ) +
+  theme_minimal()
+
+############################################
+# snow_nse <- NSE(snow_compare$snowWateq, snow_compare$SNOmm)
+# print(snow_nse)
+# 
+# bf_nse <- NSE(mergeddataframe$Calibrated_baseflow, mergeddataframe$Observed_baseflow)
+# print(bf_nse)
+
+#############################################
+
+lm_snow<- lm(snow_compare$snowWateq~snow_compare$SNOmm)
+summary(lm_snow)
+
+sum_diff_snow <- sum(snow_compare$snowWateq-snow_compare$SNOmm)
+
+# Calculate the sum of the observed data
+sum_obs_snow <- sum(snow_compare$snowWateq)
+
+# Calculate PBIAS
+PBIAS_snow <- (sum_diff_snow / sum_obs_snow) * 100
+print(PBIAS_snow)
+
+plot()
+# Calculate RMSE
+rmse <- sqrt(mean((calibrated - observed)^2))
+
+# Calculate the standard deviation of the observed data
+stdev_observed <- sd(observed)
+
+# Calculate RSR
+rsr <- rmse / stdev_observed
+
+# Print the RSR value
+print(rsr)
+
+snow_compare$avg_temp <- ((snow_compare$MaxTemp+snow_compare$MinTemp)/2)
