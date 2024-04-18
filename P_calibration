@@ -1,0 +1,176 @@
+library(dplyr)
+library(ggplot2)
+
+
+setwd("~/LOC_Watershed/calib_vsa4/TxtInOut/calib202404151132")
+source(paste0(codedir, "/readSWAT_3.R"))
+save(readSWAT,file="readSWAT.R")
+out_Calib_Tflo <- readSWAT("rch")
+output_rch_3 = out_Calib_Tflo[out_Calib_Tflo$RCH==3,]
+output_observed_merged <- merge(flowgage$flowdata,output_rch_3, all=F)
+
+
+# This will prompt you for authentication on your first run
+#googlesheets4::gs4_auth()
+
+# Read the Google Sheet by its name or ID
+
+observed_data <- read.csv("Total_P.csv")
+
+# Assuming your date is in the format "mm/dd/yy"
+# First, convert the date to the Date type
+observed_data$Date <- as.Date(observed_data$Date, format="%m/%d/%y")
+
+# Now format the date as a string "yyyy-mm-dd"
+#observed_data$Date <- format(observed_data$Date, "%Y-%m-%d")
+
+
+output_rch_3$Date <- as.Date(output_rch_3$mdate, format="%Y-%m-%d")
+simulated_data <- output_rch_3
+
+# Select the 'TOT_Pkg' column and rename it
+simulated_data <- simulated_data %>% select(Date, Simulated_P_kg = TOT_Pkg)
+
+# Merge the observed and simulated data by the 'Date' column
+common_data <- merge(observed_data, simulated_data, by = "Date", all = FALSE)
+
+# ggplot(common_data, aes(x = Date)) +
+#   geom_point(aes(y = Simulated_P_kg, color = "Simulated")) +
+#   geom_point(aes(y = Total_P_kg, color = "Observed")) +
+#   labs(x = "Date", y = "Phosphorus (kg)", title = "Simulated vs Observed Phosphorus") +
+#   theme_minimal() +
+#   scale_color_manual(values = c("Simulated" = "blue", "Observed" = "red"))
+
+# plot(common_data$Simulated_P_kg, common_data$Total_P_kg)
+# 
+# r <- cor(common_data$Simulated_P_kg, common_data$Total_P_kg)
+# 
+# # Square the correlation coefficient to get R-squared
+# r_squared <- r^2
+
+# Define your start and end dates for the subset
+start_date <- as.Date("2020-12-01")
+end_date <- as.Date("2023-06-30")
+
+# Create a logical vector for whether each row is in the duration
+is_within_duration <- output_rch_3$Date >= start_date & output_rch_3$Date <= end_date
+
+# Subset the dataframe
+subset_dataframe <- output_rch_3[is_within_duration, ]
+
+# ggplot(subset_dataframe, aes(x = Date)) +
+#   geom_point(aes(y = TOT_Pkg, color = "Simulated"))
+# 
+# ggplot(common_data, aes(x = Date)) +
+#   geom_point(aes(y = Total_P_kg, color = "Observed"))
+
+##############################################################
+###Events##############
+
+#Prepare this 'Events' csv file beforehand. It has event start date, end date, flow volume in Liter and P load in kg
+
+Events <- read.csv("Events.csv")
+
+# Convert the date columns to Date objects
+
+Events$start_date <- as.Date(Events$start_date, format="%m/%d/%Y")
+Events$end_date <- as.Date(Events$end_date, format="%m/%d/%Y")
+Events$sample_collection <- as.Date(Events$sample_collection, format="%m/%d/%Y")
+Events$start_date <- as.Date(Events$start_date, format="%m/%d/%Y")
+Events$end_date <- as.Date(Events$end_date, format="%m/%d/%Y")
+output_observed_merged$date <- as.Date(output_observed_merged$date)
+
+# Using left_join() to keep all rows from 'output_observed_merged' and get matching rows from 'modeldata'
+output_observed_merged <- left_join(output_observed_merged, modeldata[c('date', 'P')], by = 'date')
+
+
+# Initialize vectors to store the aggregated flow data
+simulated_flow_totals <- numeric(nrow(Events))
+#observed_flow_totals <- numeric(nrow(Events))
+total_precip_per_event <- numeric(nrow(Events))
+total_P_per_event <- numeric(nrow(Events))
+
+# Loop through each event and sum the flows within the event date ranges
+for (i in 1:nrow(Events)) {
+  # Subset daily data to the date range of the current event
+  event_data <- subset(output_observed_merged, date >= Events$start_date[i] & date <= Events$end_date[i])
+  
+  # Sum the flows for the event period and store them in the vectors
+  simulated_flow_totals[i] <- sum(event_data$FLOW_OUTcms*86400, na.rm = TRUE)#converting m3/s to m3/day
+  #observed_flow_totals[i] <- sum(event_data$flowcms, na.rm = TRUE)
+  # Sum the precipitation for the event and store it
+  total_precip_per_event[i] <- sum(event_data$P.x, na.rm = TRUE)
+  total_P_per_event[i] <- sum(event_data$TOT_Pkg, na.rm = TRUE)
+}
+
+# Add the aggregated flow totals to the Events dataframe
+Events$Simulated_Flow_Total <- simulated_flow_totals
+#Events$Observed_Flow_Total <- observed_flow_totals
+# Add the total precipitation to the Events dataframe
+Events$Total_Precip <- total_precip_per_event
+Events$Total_P_simulated <- total_P_per_event
+Events$vol <- Events$vol*0.001
+
+
+# plot
+library(ggplot2)
+# Define font sizes
+title_size <- 13
+text_size <- 13 # Size for axis and legend text
+
+ggplot(Events, aes(x = end_date)) +
+  geom_point(aes(y = Simulated_Flow_Total, color = "Simulated")) +
+  geom_point(aes(y = vol, color = "Observed")) +
+  #geom_point(aes(y = Total_Precip, color = "Precip"))+
+  
+  labs(x = "Time", y = "Flow (m3)", 
+       title = "") +
+  labs(color = "") +
+  theme_minimal()+
+  theme(plot.title = element_text(size = title_size, hjust = 0.5),
+        axis.title = element_text(size = title_size),
+        axis.text = element_text(size = text_size),
+        panel.border = element_rect(colour = "black", size = 1, fill = NA),
+        plot.margin = margin(t = 5, r = 23, b = 5, l = 5, unit = "pt"))+ 
+  scale_color_manual(values = c("Simulated" = "blue", "Observed" = "red", "Precip"="green"))
+
+# Create the plot
+ggplot(Events, aes(x = end_date)) +
+  geom_point(aes(y = Simulated_Flow_Total, color = "Simulated")) +
+  geom_point(aes(y = vol, color = "Observed")) +
+  geom_point(aes(y = Total_Precip*100000, color = "Precip")) + # Scale precipitation
+  
+  labs(x = "Time", y = "Flow (m3)", title = "") +
+  theme_minimal() +
+  scale_color_manual(values = c("Simulated" = "blue", "Observed" = "red", "Precip" = "green"))+ 
+  scale_y_continuous(sec.axis = sec_axis(~ ./100000, name = "Precipitation (mm)"))
+
+ggplot(Events, aes(x = end_date)) +
+  geom_point(aes(y = Total_P_simulated, color = "Simulated")) +
+  geom_point(aes(y = Tot_P, color = "Observed")) +
+  
+  labs(x = "Time", y = "Total P (kg)", 
+       title = "") +
+  labs(color = "") +
+  theme_minimal()+
+  theme(plot.title = element_text(size = title_size, hjust = 0.5),
+        axis.title = element_text(size = title_size),
+        axis.text = element_text(size = text_size),
+        panel.border = element_rect(colour = "black", size = 1, fill = NA),
+        plot.margin = margin(t = 5, r = 23, b = 5, l = 5, unit = "pt"))+ 
+  scale_color_manual(values = c("Simulated" = "magenta", "Observed" = "orange"))
+
+# Calculate the correlation coefficient
+correlation <- cor(Events$Simulated_Flow_Total, Events$vol)
+correlation_P <- cor(Events$Total_P_simulated, Events$Tot_P)
+# Calculate R-squared
+r_squared <- correlation^2
+r_squared_P <- correlation_P^2
+
+# Print the R-squared value
+print(paste("R-squared: ", r_squared_P))
+
+NSE_total_flow <- NSeff (Events$Simulated_Flow_Total, Events$vol)
+NSE_total_P <- NSeff(Events$Tot_P, Events$Total_P_simulated)
+
+plot(output_observed_merged$date, output_observed_merged$FLOW_OUTcms)
