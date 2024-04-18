@@ -1,0 +1,504 @@
+rm(list = objects())
+myhomedir = Sys.getenv("HOME")
+basedir = myhomedir
+caldir="~/LOC_Watershed/calib_vsa4"
+dir.create(caldir,recursive = T)
+srcdir=paste0(myhomedir,"/src")
+dir.create(srcdir,recursive = T)
+myflowdir = "~/LOC_Watershed/LOCdata/Flow"
+codedir = paste0(basedir,"/swat_LOC/R" )
+dir.create(codedir,recursive = T)
+
+setwd(caldir)
+
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(SWATmodel,dplyr,EcoHydRology,base,topmodel,utils, lubridate,stringr,diffobj,tidyr,rnoaa,readr,ggplot2)
+
+flowgage_id="04282650" #Little Otter Creek at Ferrisburg, VT.
+flowgage=get_usgs_gage(flowgage_id,begin_date = "2019-01-01",end_date= "2023-06-30")
+#flowgage$flowdata$Qmm=(flowgage$flowdata$flow)/(flowgage$area*1000)#mm
+flowgage$flowdata$flowcms = flowgage$flowdata$flow/24/3600 #m3/s
+
+setwd("~")
+dir.create("/dev/shm/sabrinam21")
+setwd("/dev/shm/sabrinam21/")
+# unlink("calib_vsa", recursive = TRUE)
+unlink("VSACalib4", recursive = TRUE)
+# dir.create("calib_vsa2")
+# file.copy(list.files("/swat_LOC/R/setup_swatcal.R/",full.names = TRUE,recursive = TRUE),"/LOC_Watershed/calib_vsa2/TxtInOut/",recursive = TRUE)
+# getwd() 
+# setwd("calib_vsa2")
+# list.files(getwd())
+
+'
+Baseflow separation (function from EcoHydRology package) --------------------------
+Lyne, V. D. and M. Hollick (1979). Stochastic time-variable rainfall-runoff modelling. 
+Hydrology and Water Resources Symposium, Perth, Institution of Engineers, Australia.
+
+Nathan, R. J. and T. A. McMahon (1990). "Evaluation of automated techniques for base flow and recession analysis." 
+Water Resources Research 26(7): 1465-1473.--------------------------------------------
+Use a USGS Gauge dataframe structure for Stroubles Creek
+'
+#-----------------------------------------------------------------
+
+# check the number of days between the start and end date for consistency
+num_days <- as.numeric(difftime(flowgage$flowdata$mdate[length(flowgage$flowdata$mdate)], flowgage$flowdata$mdate[1], units = "days"))
+
+# weather data
+source(paste0(codedir, "/FillMissWX_rev1.R"))
+WXData <- FillMissWX(declat=flowgage$declat, declon=flowgage$declon,
+                     StnRadius=30,minstns=10,date_min= "2019-01-01",
+                     date_max= "2023-06-30",targElev=flowgage$elev,
+                    method = "IDW",alfa=2)
+# plot data
+
+
+plot(flowgage$flowdata$mdate, flowgage$flowdata$flow/flowgage$area/10^3*24*60*60, 
+     type = "l", col = "black", xlab = "Date", ylab = "Q in mm", lty = 3)
+
+#----------------------Add prcp vs x with a secondary x-axis
+par(new = TRUE)
+plot(WXData$date, -1*WXData$P/10 + max(pretty(range(WXData$P/10))), 
+     type = "l", col = "red", xlab = "", ylab = "", axes = F)
+axis(side = 4, at = pretty(range(WXData$P/10)), label = T)
+mtext("y2", side = 4, line = 3)
+
+#-----------------------Estimating missing values
+
+flowgage$flowdata$mon <- month(flowgage$flowdata$mdate)
+flowgage$flowdata$day <- day(flowgage$flowdata$mdate)
+flowgage$flowdata <- flowgage$flowdata %>% group_by(mon,day) %>% mutate(meanyear = mean(flowcms, na.rm=T))
+flowgage$flowdata[is.na(flowgage$flowdata$flowcms),]$flowcms = flowgage$flowdata[is.na(flowgage$flowdata$flowcms),]$meanyear
+
+#----------------------Baseflow Estimation/Separation
+
+streamflow <- flowgage$flowdata$flowcms
+summary(streamflow)
+runoff <- BaseflowSeparation(streamflow, filter_parameter = 0.925, passes = 3)
+plot(flowgage$flowdata$flowcms, type = "l") #, ylim=c(0,6), xlim = c(830,900)
+#lines(runoff$qft, col="blue")
+points(runoff$bt, col="red")
+summary(runoff)
+flowgage$flowdata$baseflow = runoff$bt
+flowgage$flowdata$RO = runoff$qft
+flowgage$flowdata$ROmm = runoff$qft/flowgage$area/10^3*24*60*60
+plot(flowgage$flowdata$flowcms, type="l", xlim = c(0,1600), ylim=c(0,40))
+lines(flowgage$flowdata$baseflow, col="red")
+#points(flowgage$flowdata$baseflow, col="red")
+
+#---------------------------------------------------------------------------------------
+flowgage$flowdata$ROmm = flowgage$flowdata$RO/flowgage$area * 3.6 * 24
+modeldata = merge(WXData,flowgage$flowdata,by.x="date",by.y="mdate")
+modeldata$Month = month(modeldata$date)
+modeldata$Qmm = modeldata$flowcms/flowgage$area * 3.6 * 24
+TMWB_S = modeldata
+TMWB_S$ET = (sum(TMWB_S$P, na.rm = T) - sum(TMWB_S$Qmm, na.rm = T)) / length(TMWB_S$date)
+
+###----------------------------Snow Fall Water Equivalent
+
+modeldata$snowDen <- 50+3.4*((modeldata$MaxTemp + modeldata$MinTemp)/2+15)	
+#modeldata$snowDen2 <- (90 + 130*sqrt(modeldata$SD/1000)) * (1.5 + 0.17 * ((modeldata$MaxTemp + modeldata$MinTemp)/2)^(1/3))
+modeldata$snowDen[modeldata$snowDen < 50] <- 50
+modeldata$snowWateq <- modeldata$SD * modeldata$snowDen/1000
+
+xplot <- modeldata[modeldata$snowWateq>0,]
+plot(xplot$P,xplot$snowWateq)
+plot(modeldata$snowDen, modeldata$snowDen2, xlim = c(90,200))
+
+###----------------------------------------------------------------------------------------
+'
+Rallison (1980) indicted that either the rate of infiltration at the soil surface or the amount
+of water storage available in the soil profile limits S; whichever gives the smaller S value.
+Since watershed infiltration rates at the soil surface are influenced strongly by rainfall impact,
+they are strongly affected by the rainfall intensity.  However, since no information on intensity is
+normally available, it was not included.  Also, there was no general relationship between rainfall amounts and intensities.
+'
+
+#------------------------------------- Simple Water Balance -------------------------------
+
+myflowgage = flowgage
+lower <- c(0.01, 0.27, 0.12, 500, -5, 1.4, 1.4, 2, 0.001)        
+upper <- c(0.5, 0.35, 0.13, 2000, 5, 7, 7, 3, 1)
+set.seed(1234)
+
+source(paste0(codedir, "/TMWBoptFunc.R"))
+source(paste0(codedir, "/TMWBFuncs.R"))
+source(paste0(codedir, "/TISnow.R"))
+
+objective_fn <- function(x,TMWB_S) {
+  y=TMWBoptFunc(x,TMWB_S)
+  NS = y[[1]]
+}
+
+outTMWB <- DEoptim(objective_fn, lower, upper, DEoptim.control(NP = 9, itermax = 100, F = 1.2, CR = 0.7), TMWB_S)
+
+x= outTMWB$optim$bestmem
+outTMWB <- TMWBoptFunc(x,TMWB_S)  ### TMWB optimization function
+NS <- outTMWB[[1]]
+outTMWB <- outTMWB[[2]]
+
+TMWB_JO = outTMWB[!is.na(outTMWB$Pe),]  #### days where there is no Snow Fall
+
+attach(TMWB_JO)
+plot(Pe,ROmm)
+points(Pe,Pe^2/(Pe+45),col="red")  # S guesstimates in bold
+points(Pe,Pe^2/(Pe+260),col="blue")# S guesstimates in bold
+detach(TMWB_JO)
+
+#--------------------------------- filter days with Pe > 0
+TMWB_JO = TMWB_JO[TMWB_JO$Pe>0,]
+attach(TMWB_JO)
+f <- function (x) {
+  Sest=x
+  NSE(ROmm,Pe^2/(Pe+Sest))
+}
+set.seed(1234)
+Sest=optimize(f, c(50,500), tol = 0.0001,maximum = TRUE)$maximum
+plot(dP,ROmm)
+points(Pe,Pe^2/(Pe+Sest),col = "green") 
+text(100,30, paste0("S=",round(Sest,0)))
+detach(TMWB_JO)
+
+
+#Sest = 314.55347
+CN = 25400/(254 + 160)  ### 25.4 is a factor for unit conversion from inch based relation to mm based relation
+CNest = 25400/(254 + Sest)
+CNest
+CNest = 44.7
+
+#-----------------------------------VSA Distribute-----------------------------------------
+
+source(paste0(codedir, "/CN_Dist.R"))
+
+CN_VSA = CN_Dist(CNest)
+#CN_VSA = CN_Dist(35)
+plot(CN_VSA$Area_fraction_As, CN_VSA$TI_CN, ylim = c(0,100))
+lines(CN_VSA$Area_fraction_As, CN_VSA$Sigma)
+mean(CN_VSA$TI_CN, na.rm=T) # CN equation is non-linear, therefor the average CN is not the same as basin wide CN
+
+# S is the same in both cases; this is the mean CN after CN distribution
+
+source(paste0(codedir,"/VSA_dict.R"))
+CN_dict = VSA_dict(CN_VSA)
+
+
+
+### ---------------------------------------------------------------------------------------
+### --------------------------------- Calibration -----------------------------------------
+### ---------------------------------------------------------------------------------------
+snowdf = modeldata[,c("date","MaxTemp","MinTemp","snowWateq")]
+
+setwd("/dev/shm/sabrinam21/")
+dir.create("VSACalib4")
+setwd("/dev/shm/sabrinam21/VSACalib4")
+file.copy(list.files("~/LOC_Watershed/calib_vsa4/TxtInOut",full.names = TRUE,recursive = TRUE),"/dev/shm/sabrinam21/VSACalib4/",recursive = TRUE)
+
+
+#----------------------------------Load Calibration Required Functions---------------------------------
+#source(paste0(codedir, "/readswat_2.R"))
+source(paste0(codedir, "/readSWAT_3.R"))
+save(readSWAT,file="readSWAT.R")
+source(paste0(codedir, "/alter_files.R"))
+#source(paste0(codedir, "/setup_swatcal.R"))
+#source(paste0(codedir, "/swat_objective_function_rch.R"))
+source(paste0(codedir, "/swat_objective_function_snow.R"))
+source(paste0(codedir, "/swat_objective_function_rch_runoff.R"))
+source(paste0(codedir, "/swat_objective_function_rch_baseflow.R"))
+source(paste0(codedir, "/BaseflowSeparation.R"))
+source(paste0(codedir,"/new_obj_function.R"))
+
+file.rename("Tmp1.Tmp", "tmp1.tmp")
+#--------load calib params
+
+whatcal = readline("What calibration was that? Tflow/Bflow/Snow/sroff/SM :")
+
+#----------------------------------------------------------------------------------------------------------------------------------
+
+if (whatcal == "Bflow") {
+  calib_range = c("2010-01-01","2022-12-31") 
+  
+  params_select = c(1:6,14,19,21:24,29,32:33)  ### based on the sensitivity analysis result
+}
+
+if (whatcal == "Snow") {
+  calib_range = c("2019-01-01","2023-06-30") 
+  
+  'SNOCOVMX set to 5mm or minimum snow depth for 100% snow coverage in the watershed. Using editSWATfile.R'
+  params_select = c(7,8,9,10,11,32)  ### based on the sensitivity analysis result
+}
+
+if (whatcal == "Tflow") {
+  calib_range = c("2019-01-01","2023-06-30") 
+  
+  params_select = c(1:14,19,21,23,24,32,33)  ### based on the sensitivity analysis result
+}
+
+if (whatcal == "SM") {
+  calib_range = c("2010-01-01","2022-12-31") 
+  
+  params_select = c(1:7,15,20,23,24:25,30,33:34)  ### based on the sensitivity analysis result
+}
+
+change_params=""
+rm(change_params)
+load(paste(path.package("EcoHydRology"), "data/change_params.rda", sep = "/"))
+
+# # Add the new level "SNOCOVMX" if it's not already in the levels
+# if (!"SNOCOVMX" %in% levels(change_params$parameter)) {
+#   change_params$parameter <- factor(change_params$parameter, levels = c(levels(change_params$parameter), "SNOCOVMX"))
+# }
+# 
+# # Copy row 7 and modify it for the new parameter
+# newrow <- change_params[7,]
+# newrow$parameter <- "SNOCOVMX"
+# 
+# # Insert the new row into the data frame
+# change_params <- rbind(change_params, newrow) # Adds the new row at the end
+
+calib_range=c("2019-01-01","2023-06-30") 
+
+calib_params = change_params
+
+
+calib_params$min[1]= 15.5
+calib_params$max[1]= 30.0
+calib_params$current[1]= 15.5
+calib_params$min[2]=0.5
+calib_params$max[2]= 0.9
+calib_params$current[2]=1.0
+calib_params$min[3]= 215.0
+calib_params$max[3]= 230.0
+calib_params$current[3]= 200.0
+calib_params$min[4]= 0.0
+calib_params$max[4]= 0.2
+calib_params$current[4]= 0.1
+calib_params$min[5]= 42.0
+calib_params$max[5]= 50.0
+calib_params$current[5]= 50.0
+calib_params$min[6]=0.2
+calib_params$max[6]= 1.0
+calib_params$current[6]=0.35
+calib_params$min[7]= -5.0
+calib_params$max[7]= 5.0
+calib_params$current[7]= 2.0
+calib_params$min[8]= -5.0
+calib_params$max[8]= 5.0
+calib_params$current[8]= 2.0
+calib_params$min[9]= 0.0
+calib_params$max[9]= 5.0
+calib_params$current[9]= 3.0
+calib_params$min[10]= 0.0
+calib_params$max[10]= 5
+calib_params$current[10]= 3.0
+calib_params$min[11]=0.01
+calib_params$max[11]=1.0
+calib_params$current[11]= 1.0
+calib_params$min[12]= 0.1
+calib_params$max[12]= 1.0
+calib_params$current[12]= 1.0
+calib_params$min[13]=0.1
+calib_params$max[13]=1.0
+calib_params$current[13]= 1.0
+calib_params$min[14]=0.5
+calib_params$max[14]=1.5
+calib_params$current[14]= 1.5
+calib_params$min[19]= 55
+calib_params$max[19]=70
+calib_params$current[19]= 64.0
+calib_params$min[21]=0.5
+calib_params$max[21]=1.5
+calib_params$current[21]= 1.5
+calib_params$min[23]=0.5
+calib_params$max[23]=1.5
+calib_params$current[23]= 1.5
+calib_params$min[24]=0.5
+calib_params$max[24]=1.5
+calib_params$current[24]= 1.5
+calib_params$min[32]= 0.1
+calib_params$max[32]= 1.0
+calib_params$current[32]= 1.0
+calib_params$min[33]=0.1
+calib_params$max[33]=1.0
+calib_params$current[33]= 0.33
+# calib_params$min[42]=1.0
+# calib_params$max[42]=10.0
+# calib_params$current[42]= 10.0
+
+calib_params = calib_params[params_select,]
+posCN = grep("CN2$", calib_params$parameter)
+
+levels(calib_params$parameter)[2] <- "ALPHA_BF "
+#setwd("~/LOC_Watershed/calib_vsa4/TxtInOut")
+#unlink("output*")
+calib_params[1:7]
+setup_swatcal(calib_params)
+
+rch=1 #rch number for calibration
+x=calib_params$current
+
+
+
+#########
+
+#swat_objective_function_rch(x, calib_range, calib_params, flowgage, rch,CN_dict,save_results=F)
+if (whatcal == "Bflow") {
+  cl <- parallel::makeCluster(14)
+  set.seed(1234)
+  outDEoptim_Calib <- DEoptim(swat_objective_function_rch_baseflow,calib_params$min,calib_params$max,
+                              DEoptim.control(cluster=cl,strategy = 6, NP = 14, itermax=300, parallelType = "parallel",  # 
+                                              packages = c("stringr","SWATmodel","dplyr","EcoHydRology","base","topmodel","utils"),
+                                              parVar=c("%<%","NSeff","read.fortran","readSWAT","alter_files","str_extract","CN_Dist","VSA_dict")), #
+                              calib_range, calib_params, flowgage, rch, posCN) 
+  x = outDEoptim_Calib$optim$bestmem
+  filename = format(Sys.time(), "%Y%m%d%H%M_outDEoptim_Calib.RData")
+  assign(filename,outDEoptim_Calib)
+  save(outDEoptim_Calib,file=format(Sys.time(), paste0(caldir,"/",filename)))
+  
+  parallel::stopCluster(cl)
+  
+  setwd(caldir)
+  load(filename)
+  nam = paste0("Best Parameter", whatcal)
+  assign(nam,data.frame(Params = as.vector(change_params$parameter[params_select]), 
+                        bestmem = round(as.vector(outDEoptim_Calib$optim$bestmem),4)))
+  
+}
+
+if (whatcal == "Snow") {
+  cl <- parallel::makeCluster(14)
+  set.seed(1234)
+  outDEoptim_Calib <- DEoptim(swat_objective_function_snow,calib_params$min,calib_params$max,
+                              DEoptim.control(cluster=cl,strategy = 6, NP = 14, itermax=300, parallelType = "parallel",  # 
+                                              packages = c("stringr","SWATmodel","dplyr","EcoHydRology","base","topmodel","utils"),
+                                              parVar=c("%<%","NSeff","read.fortran","readSWAT","alter_files","str_extract","CN_Dist","VSA_dict")), #
+                              calib_range, calib_params, snowdf, rch, posCN) # 
+  x = outDEoptim_Calib$optim$bestmem
+  filename = format(Sys.time(), "%Y%m%d%H%M_outDEoptim_Calib.RData")
+  #filename= "202311071931_outDEoptim_Calib.RData"
+  assign(filename,outDEoptim_Calib)
+  save(outDEoptim_Calib,file=format(Sys.time(), paste0(caldir,"/",filename)))
+  
+  parallel::stopCluster(cl)
+  
+  setwd(caldir) # give it the right folder name
+  load(filename)
+  nam = paste0("Best Parameter", whatcal)
+  assign(nam,data.frame(Params = as.vector(change_params$parameter[params_select]), 
+                        bestmem = round(as.vector(outDEoptim_Calib$optim$bestmem),4)))
+  
+}
+
+if (whatcal == "Tflow") {
+  cl <- parallel::makeCluster(16)
+  set.seed(1234)
+  outDEoptim_Calib <- DEoptim(swat_objective_function_rch,calib_params$min,calib_params$max,
+                              DEoptim.control(cluster=cl,strategy = 6, NP = 16, itermax=300, parallelType = "parallel",  # 
+                                              packages = c("stringr","SWATmodel","dplyr","EcoHydRology","base","topmodel","utils"),
+                                              parVar=c("%<%","NSeff","read.fortran","readSWAT","alter_files","str_extract","CN_Dist","VSA_dict")), #
+                              calib_range, calib_params, flowgage, rch, posCN) # ,snowdf
+  x = outDEoptim_Calib$optim$bestmem
+  filename = format(Sys.time(), "%Y%m%d%H%M_outDEoptim_Calib.RData")
+  assign(filename,outDEoptim_Calib)
+  save(outDEoptim_Calib,file=format(Sys.time(), paste0(caldir,"/",filename)))
+  
+  #parallel::stopCluster(cl)
+  
+  setwd(caldir)
+  load(filename)
+  nam = paste0("Best_Parameter_", whatcal, Sys.Date())
+  assign(nam,data.frame(Params = as.vector(change_params$parameter[params_select]), 
+                        bestmem = round(as.vector(outDEoptim_Calib$optim$bestmem),4)))
+  
+}
+
+###------------------------------------ SAVE CALIBRATED SWAT FILES
+if (whatcal == "sroff") {
+  
+  ###----------------------------Save surface runoff calibration-----------------------------
+  CN_sroff_cal=CN_Dist(outDEoptim_Calib$optim$bestmem[posCN])
+  CN_sroff_VSA_mean=mean(CN_sroff_cal$TI_CN,na.rm = T)
+  setwd(paste0(caldir, "/TxtInOut"))
+  source(paste0(srcdir, "/ecohydrology/pkg/SWATmodel/R/readSWAT.R"))
+  save(readSWAT,file="readSWAT.R") 
+  file.rename("Tmp1.Tmp", "tmp1.tmp")
+  load(paste(path.package("EcoHydRology"), "data/change_params.rda", sep = "/"))
+  calib_range=c("2010-01-01","2022-12-31") 
+  set.seed(12345)
+  x_sroff = as.vector(outDEoptim_Calib$optim$bestmem)
+  calib_params = change_params[params_select,]
+  calib_params
+  levels(calib_params$parameter)[2] <- "ALPHA_BF "
+  setup_swatcal(calib_params)
+  out_Calib_sroff <- swat_objective_function_rch_runoff(x=x_sroff, calib_range, calib_params, flowgage, rch,CN_dict,save_results=T)
+  
+}
+
+if (whatcal == "Bflow") {
+  
+  ###----------------------------Save baseflow calibration-----------------------------
+  #CN_bflo_cal=CN_Dist(outDEoptim_Calib$optim$bestmem[posCN])
+  #CN_bflo_VSA_mean=mean(CN_sroff_cal$TI_CN,na.rm = T)
+  setwd(paste0(caldir, "/TxtInOut"))
+  source(paste0(srcdir, "/ecohydrology/pkg/SWATmodel/R/readSWAT.R"))
+  save(readSWAT,file="readSWAT.R") 
+  file.rename("Tmp1.Tmp", "tmp1.tmp")
+  load(paste(path.package("EcoHydRology"), "data/change_params.rda", sep = "/"))
+  calib_range=c("2010-01-01","2022-12-31") 
+  set.seed(12345)
+  x_bflo = as.vector(outDEoptim_Calib$optim$bestmem)
+  params_select =c(1:11,21,23,24,32,33)
+  calib_params = change_params[params_select,]
+  calib_params
+  levels(calib_params$parameter)[2] <- "ALPHA_BF "
+  setup_swatcal(calib_params)
+  out_Calib_bflo <- swat_objective_function_rch_baseflow(x=x_bflo, calib_range, calib_params, flowgage, rch,CN_dict,save_results=T)
+  
+}
+
+
+if (whatcal == "Tflow") {
+  ###----------------------------Save Tflow calibration-----------------------------
+  CN_Tflo_cal=CN_Dist(outDEoptim_Calib$optim$bestmem[posCN])
+  CN_Tflo_VSA_mean=mean(CN_Tflo_cal$TI_CN,na.rm = T)
+  setwd(paste0(caldir, "/TxtInOut"))
+  source(paste0(codedir, "/readSWAT_3.R"))
+  save(readSWAT,file="readSWAT.R") 
+  file.rename("Tmp1.Tmp", "tmp1.tmp")
+  load(paste(path.package("EcoHydRology"), "data/change_params.rda", sep = "/"))
+  calib_range=c("2019-01-01","2023-06-30") 
+  set.seed(12345)
+  x_Tflo = as.vector(outDEoptim_Calib$optim$bestmem)# as.vector(outDEoptim_Calib$optim$bestmem) #unlist(out_NS[[110]]) 
+  
+  params_select = c(1:14,19,21,23,24,32,33) 
+  calib_params = change_params[params_select,]
+  calib_params
+  levels(calib_params$parameter)[2] <- "ALPHA_BF "
+  setup_swatcal(calib_params)
+  out_Calib_Tflo <- swat_objective_function_rch(x=x_Tflo, calib_range, calib_params, flowgage, rch,posCN,save_results=T) #,snowdf
+  
+}
+
+if (whatcal == "Snow") {
+  
+  ###----------------------------Save snow calibration-----------------------------
+  
+  CN_Tflo_cal=CN_Dist(outDEoptim_Calib$optim$bestmem[posCN])
+  CN_Tflo_VSA_mean=mean(CN_Tflo_cal$TI_CN,na.rm = T)
+  setwd(paste0(caldir, "/TxtInOut")) # the swat initialization files folder
+  source(paste0(codedir, "/readswat_2.R"))
+  save(readSWAT,file="readSWAT.R") 
+  file.rename("Tmp1.Tmp", "tmp1.tmp")
+  load(paste(path.package("EcoHydRology"), "data/change_params.rda", sep = "/"))
+  calib_range=c("2019-01-01","2023-06-30") 
+  set.seed(12345)
+  x_snow =  as.vector(outDEoptim_Calib$optim$bestmem) #unlist(out_NS[[110]]) 
+  params_select = c(7,8,9,10,11,32) 
+  calib_params = change_params[params_select,]
+  calib_params
+  levels(calib_params$parameter)[2] <- "ALPHA_BF "
+  setup_swatcal(calib_params)
+  out_Calib_Tflo <- swat_objective_function_snow(x=x_snow, calib_range, calib_params, snowdf, rch,posCN,save_results=T) 
+  #calib202311011259
+}
+
+###-----------------------------------?????????????????-----------------------------------
