@@ -1,0 +1,380 @@
+'
+Author: Binyam Asfaw
+'
+'
+This code reads in SWAT out put files .hru, .sub, .rch,.swr
+and format into a dataframe. Select water balance components and summerize 
+into daily, monthly, seasonal and annual balance. Each written into separate dataframe.
+
+The code also produces a pie chart to show annual and long term water balance
+'
+
+###---------------------------------Tidy SWAT output -------------------------------------
+rm(list=ls())
+#Load Libraries
+if(!require("pacman")) install.packages("pacman")
+
+pacman::p_load(SWATmodel,EcoHydRology,base,topmodel,utils, stringr,diffobj,readr,ggplot2,dplyr,lubridate, plotly)
+
+#-----------------------RUN THIS CODE SECTION INTERACTIVELY OR SOURCE THE FILE FROM CONSOLE
+#-------------------------------- setup working directories
+
+setwd("~")
+folder = readline(prompt = 'SWAT output filename:') 
+# this is the name of the swat output file
+
+wdir = readline(prompt = 'The root working directory :')  # path to working directory
+
+setwd(paste0(wdir,"/",folder))                           # this sets the working directory
+
+
+'Set up other required variables'
+
+start_date = readline(prompt = 'Start date of water balance Y-m-d:') 
+end_date = readline(prompt = 'End date of water balance Y-m-d:')
+outlet_rch = as.numeric(readline(prompt = 'read in the outlet rch :'))
+
+flowgage = flowgage                # observed flowgage data
+
+###--------------------------------- FUNCTIONS 
+
+###---------------------------------Read Subbasin File
+readSUBoutput <- function () {
+  output_sub <- readSWAT("sub")
+  print(colnames(output_sub))
+  columnnames = strsplit(readline(prompt = 'Select the columns to keep :'),split = ",")[[1]]
+  output_sub <- output_sub %>% dplyr::select(all_of(columnnames)) #SUB,mdate,MON,AREAkm2,PRECIPmm,ETmm,SWmm,PERCmm,LAT_Q(mm),WYLDmm,GW_Qmm,SURQmm,PERCmm
+  return(output_sub)
+}
+
+output_sub = readSUBoutput()
+head(output_sub)
+
+
+calculate_watershed_averages <- function(output_sub){
+      
+      
+      area_weighted <- output_sub %>% mutate(year = year(mdate)) %>% group_by(year,SUB)  %>%  
+        
+                            mutate(prcp_ws = PRECIPmm*AREAkm2/flowgage$area, ETmm_ws = ETmm*AREAkm2/flowgage$area, 
+                                 SWmm_ws = SWmm*AREAkm2/flowgage$area, latflow_ws = `LAT_Q(mm)` *AREAkm2/flowgage$area, 
+                                 GWQmm_ws = GW_Qmm*AREAkm2/flowgage$area, surfQmm_ws = SURQmm*AREAkm2/flowgage$area, 
+                                 PERCmm_ws = PERCmm*AREAkm2/flowgage$area) #%>% 
+                           # select(year, mdate, MON, AREAkm2, PRECIPmm, ETmm, SWmm,PERCmm,`LAT_Q(mm)`,WYLDmm,GW_Qmm,SURQmm)
+      
+      watershed_averages <- area_weighted %>% group_by(mdate)  %>% 
+                             mutate(prcp_WS = sum(prcp_ws), ETmm_WS = sum(ETmm_ws), SWmm_WS = sum(SWmm_ws), latflow_WS = sum(latflow_ws), 
+                                  GWQmm_WS = sum(GWQmm_ws), surfQmm_WS = sum(surfQmm_ws), PERCmm_WS = sum(PERCmm_ws))
+      
+      watershed_averages <- watershed_averages  %>%  dplyr::select(MON,year, mdate, prcp_WS, ETmm_WS, SWmm_WS, latflow_WS, GWQmm_WS, 
+               surfQmm_WS, PERCmm_WS) %>% unique() 
+      return(watershed_averages)
+}
+
+watershed_averages = calculate_watershed_averages(output_sub)
+# head(watershed_averages)
+###--------------------------------------Daily
+calculate_daily_water_balance <-  function(watershed_averages) {
+  
+  daily_water_balance <- watershed_averages %>% group_by(year) %>%  
+    mutate(water_bal = prcp_WS - surfQmm_WS - latflow_WS - GWQmm_WS - ETmm_WS - PERCmm_WS)
+  
+  return(daily_water_balance)
+}
+
+# daily_water_balance <- calculate_daily_water_balance(watershed_averages)
+
+###--------------------------------------Monthly
+calculate_monthly_water_balance <- function(daily_water_balance){
+  
+  monthly_water_balance <- daily_water_balance %>% mutate(year = year(mdate), mon = month(mdate)) %>% group_by(year, mon) %>% 
+            mutate(prcp_WS = sum(prcp_WS), ETmm_WS = sum(ETmm_WS), latflow_WS = sum(latflow_WS), GWQmm_WS = sum(GWQmm_WS), 
+                surfQmm_WS = sum(surfQmm_WS), PERCmm_WS = sum(PERCmm_WS), water_bal=sum(water_bal)) %>% 
+            ungroup() %>% dplyr::select(-c(mdate, SWmm_WS,MON)) %>% unique()
+    return(monthly_water_balance)
+}
+
+# monthly_water_balance <- calculate_monthly_water_balance(daily_water_balance)
+# head(monthly_water_balance)
+# plot(monthly_water_balance$water_bal,type="l")
+# abline(h=0)
+###-------------------------------------Seasonal
+
+calculate_seasonal_water_balance <- function(monthly_water_balance){
+  seasonal_water_balance <- monthly_water_balance %>% mutate(season = ifelse(mon %in% 10:12, 
+                            "Fall", ifelse(mon %in% 1:3, "Winter", ifelse(mon %in% 4:6, "Spring", "Summer")))) %>% 
+          group_by(year,season) %>% mutate(prcp_WS = sum(prcp_WS),  ETmm_T = sum(ETmm_WS),  
+                                           latflow_WS = sum(latflow_WS), GWQmm_T = sum(GWQmm_WS), surfQmm_WS = sum(surfQmm_WS), 
+                                           PERCmm_WS = sum(PERCmm_WS), water_bal=sum(water_bal)) %>% 
+          ungroup() %>% dplyr::select(-c(mon)) %>%  unique()
+  return(seasonal_water_balance)
+}
+
+# seasonal_water_balance <- calculate_seasonal_water_balance(monthly_water_balance)
+# head(seasonal_water_balance)
+# barplot(seasonal_water_balance$water_bal, type="col")
+
+###--------------------------------------Annual
+calculate_annual_water_balance <- function(end_date,daily_water_balance) {
+    annual_water_balance <- daily_water_balance %>% mutate(year = year(mdate)) %>% group_by(year) %>% 
+          mutate(prcp_WS = sum(prcp_WS), ETmm_WS = sum(ETmm_WS), latflow_WS = sum(latflow_WS), 
+             GWQmm_WS = sum(GWQmm_WS), surfQmm_WS = sum(surfQmm_WS), PERCmm_WS = sum(PERCmm_WS), 
+             water_bal=sum(water_bal)) %>% ungroup() %>% dplyr::select(-c(mdate,MON, SWmm_WS)) %>% unique()
+    if(month(end_date)<12) year = year(end_date) else year=year(end_date)+1
+    annual_water_balance <- annual_water_balance[annual_water_balance$year < year,] #################################################
+    annual_water_balance <- annual_water_balance %>% mutate(ETmm_per = ETmm_WS/prcp_WS*100, 
+                                                    latflow_per = latflow_WS/prcp_WS*100, GWQmm_per = GWQmm_WS/prcp_WS*100, 
+                                                    surfQmm_per = surfQmm_WS/prcp_WS*100, PERCmm_per = PERCmm_WS/prcp_WS*100
+        )
+    return(annual_water_balance)
+}
+
+# annual_water_balance <- calculate_annual_water_balance(end_date,daily_water_balance)
+# head(annual_water_balance)
+# barplot(annual_water_balance$water_bal, type="col")
+
+###-------------------------------------Long Term
+
+calculate_longterm_waterbalance <- function(end_date,watershed_averages){
+  
+    daily_water_balance = calculate_daily_water_balance(watershed_averages)
+    annual_water_balance = calculate_annual_water_balance(end_date, daily_water_balance)
+    
+    water_balance_long <- annual_water_balance %>% dplyr::select(-c(ETmm_per,latflow_per,surfQmm_per,GWQmm_per, PERCmm_per))
+    water_balance_long <- data.frame(name= colnames(water_balance_long), values= colSums(water_balance_long))
+    water_balance_long$percent = water_balance_long$values/water_balance_long$values[2]*100
+    water_balance_long <- water_balance_long[2:length(water_balance_long$name),]
+    return(water_balance_long)
+}
+
+longterm_water_balance <- calculate_longterm_waterbalance(end_date,watershed_averages)
+head(longterm_water_balance)
+###-------------------------------------Read RCH
+
+readRCHoutput <- function(){
+
+    output_rch <- readSWAT("rch")#[,1:8]   # read and parse the required column
+    print(colnames(output_rch))
+    columnnames = strsplit(readline(prompt = 'Select the columns to keep :'),split = ",")[[1]]
+    output_rch <- output_rch %>% dplyr::select(all_of(columnnames))
+    modeled = output_rch %>% filter(RCH==outlet_rch)
+    return(modeled)
+}
+
+model_flow_prediction <- readHRUoutput()
+
+###-------------------------------------Read STD
+#--------------------reading in standard output file "AVE ANNUAL BASIN VALUES"-----------------
+
+readSTDannualvalues <- function() {
+  
+    junk%<%paste0(getwd(),"/","output.std")
+    #print(junk)
+    #junk = as.data.frame(junk)
+    rowstart=grep("AVE ANNUAL BASIN VALUES",junk)
+    rowstart=rowstart[1]+2
+    rowend=grep("OVERFLOW FROM IMPOUNDED WATER",junk)[1]
+    text=junk[rowstart:rowend]
+    variable <- sub("=.*", "", text)
+    value <- sub(".*=", "", text)
+    ave_annual <- data.frame(Variable = variable, Value = value, stringsAsFactors = FALSE)
+    ave_annual <- ave_annual %>%
+      tidyr::separate(Value, into = c("Number", "Unit"), sep = "(?<=\\d\\.\\d)(.w*)", remove = FALSE)
+    print(ave_annual)
+    rowstokeep=strsplit(readline(prompt = 'Select the rows to keep :'),split = ",")[[1]]
+    ave_annual_WB <- ave_annual[c(rowstokeep),c(1,3)]
+    ave_annual_WB$Number = as.numeric(ave_annual_WB$Number)
+    ave_annual_WB$percent <- ave_annual_WB$Number/as.numeric(ave_annual$Number[1])*100
+    rowname=strsplit(readline(prompt = 'Names for selected rows :'),split = ",")[[1]]
+    ave_annual_WB$Variable <- c(rowname)
+    result=list(ave_annual_WB,text)
+    return(result)
+}
+
+ave_annual_WB <- readSTDannualvalues()
+head(ave_annual_WB)
+
+###------------------------------------Plot observed vs modeled flow
+
+observed = flowgage$flowdata$Qm3ps[which(flowgage$flowdata$mdate == start_date):length(flowgage$flowdata$Qm3ps)]
+Modeled_Observed_Flow = cbind(model_flow_prediction,observed)
+ggplot(Modeled_Observed_Flow, aes(x=output_sub_summary$mdate, y=FLOW_OUTcms)) +
+  geom_line()  +
+  geom_line(aes(y=observed), color = "red",linetype=2)+
+  xlim(16600,17000)
+
+
+### ------------------------------------Plot annual variability
+
+ggplot(water_bal_annual, aes(x = year)) +
+  geom_line(aes(y=ETmm_per, col="ETmm_per")) +
+  geom_line(aes(y=latflow_per, col="latflow_per")) +
+  geom_line(aes(y=GWQmm_per, col="GWQmm_per")) +
+  geom_line(aes(y=surfQmm_per, col="surfQmm_per")) +
+  geom_line(aes(y= PERCmm_per, col="PERCmm_per"), lty = 4) +
+  labs(y="mm/annum")
+  scale_color_manual(values = c("red","lightblue","blue","darkblue","green"))
+  
+
+###----------------------------------- PIE Chart Water Balance Plot
+###----------long
+piedata = longterm_water_balance[c(2:5,7),]
+piedata = piedata[order(piedata$percent, decreasing = T),]
+# names and data to a dataframe
+t <- list(family = "sans serif",size = 20,color = 'black')
+# set font sizes, color, and type
+p1 <- plot_ly(data = piedata, labels = ~name, values = ~percent,
+              type = "pie") %>% layout(font = t)
+
+p1
+
+###---------annual
+
+for (i in 1:nrow(water_bal_annual)) {
+  piedata = as.data.frame(t(water_bal_annual[i,9:13]))
+  #piedata = piedata[order(piedata$percent, decreasing = T),]
+  # names and data to a dataframe
+  #t <- list(family = "sans serif",size = 20,color = 'black')
+  # set font sizes, color, and type
+  nam <- paste0("p",i)
+  assign(nam, plot_ly(data = piedata, labels = ~rownames(piedata), values = ~V1,
+                type = "pie")) 
+
+}
+t <- list(family = "sans serif",size = 20,color = 'black')
+
+# this code needs correction to print into multiple pages of a pdf
+pdf("trial.pdf")
+subplot(p1,p2,p3,p4,p5,p6,p7,p8,p9, nrows = 9) 
+dev.off()
+
+###---------From output.std file
+
+piedata = ave_annual_WB
+piedata = piedata[order(piedata$percent, decreasing = T),]
+# names and data to a dataframe
+t <- list(family = "sans serif",size = 20,color = 'black')
+# set font sizes, color, and type
+p3 <- plot_ly(data = piedata, labels = ~Variable, values = ~percent,
+              type = "pie") %>% layout(font = t)
+
+p3
+
+
+###---------------------------------Plot Modeled vs observed baseflow----------------------
+
+bflo = BaseflowSeparation(modeled$FLOW_OUTcms)
+plot(bflo$bt)
+lines(runoff$bt, col="blue")
+
+
+###---------------------------------Plot Snow Depth Modeled vs Measured -------------------
+source("~/Stroubles_Watershed/Sensi_Calib/R/readswat_2.R")
+output_hru <- readSWAT("hru")
+output_hru_S10H160 <- output_hru %>% filter(SUB==10 ) %>% filter(HRU == 160)
+# # plot(output_hru_S10H160$mdate, output_hru_S10H160$SNOmm, col= "red",ylim = c(0,50),type="l") #, xlim=c(17505,17870)
+# #modeldata$yday = yday(modeldata$date)
+# lines(modeldata$date, modeldata$snowWateq,)
+# 
+# XY = merge(snowdf, output_hru_S10H160,  by.x = "date",by.y="mdate")
+# plot(XY$SNOmm,XY$snowWateq)
+
+###---------------------------------- Output.swr ------------------------------------------
+
+readSWRoutput <- function(path= getwd()){
+  
+    output_swr=read_table2(paste0(path,"/output.swr"),skip = 2)
+    output_swr <- as_tibble(output_swr)
+    for (i in 1:length(output_swr$Day)) {
+      output_swr$SUB[i] = as.numeric(paste(unlist(strsplit(output_swr$GIS[i],split = "",fixed=T))[4:5], collapse=""))
+      print(i)
+    }
+    
+    colnames(output_swr) = c("Day","HRU","GIS","layer1","layer2","layer3","layer4",
+                             "layer5","layer6","layer7","layer8","layer9","layer10","SUB")
+    
+    return(output_swr)
+}
+
+output_swr_layer_thickness <- function(output_swr, start_year, SoilLayerThinkness, NumberOfLayers){
+  
+  output_swr = output_swr
+  start_year = start_year
+  uniqunits=length(unique(output_swr$HRU))
+  output_swr$date=as.Date(floor((row(output_swr)[,1]-1)/uniqunits)+1, origin = paste(start_year - 1, "-12-31", sep = ""))
+  numberofcol=ncol(output_swr)
+  bind = data.frame(matrix(nrow=nrow(output_swr), ncol= NumberOfLayers))
+  colnames(bind) <- c(2:(NumberOfLayers+1))
+  output_swr = cbind(output_swr,bind)
+  for (i in 1:length(unique(output_swr$GIS))){
+    print(i)
+    line = SoilLayerThinkness[unique(output_swr$GIS)[i]==SoilLayerThinkness$HRUGIS,]
+    for (j in 1:NumberOfLayers){
+      output_swr[output_swr$GIS==line$HRUGIS,][,j+numberofcol] = rep(line[1,j+1], nrow(output_swr[output_swr$GIS==line$HRUGIS,]))
+    }
+    
+  }
+ 
+  return(output_swr)
+}
+
+getLayerThickness <- function(NumberOfHRU, NumberofLayer){
+  
+  df = data.frame(matrix(nrow=NumberOfHRU, ncol=NumberofLayer+1))
+  colnames(df) <- c("HRUGIS",1:NumberofLayer)
+  i=1
+  for (file in list.files()) {
+    obj = unlist(strsplit(file, split = ".", fixed = T))
+    print(i)
+    if (obj[2] == "sol" && length(obj) <=2 ){
+      
+      junk%<%file
+      row = grep("Depth",junk)
+      text = unlist(strsplit(unlist(strsplit(junk[row], split = ":"))[2], "[0-9] "))
+      print(text)
+      df[i,1] = obj[1]
+      for (j in 1:length(text)){
+        df[i,j+1] = as.numeric(text[j])
+        #df$layer2[i] = as.numeric(text[2])
+      }
+      i = i+1
+      
+    }
+    else {
+      next
+    }
+    
+  }
+  return(df)
+  
+}
+
+output_swr <- readSWRoutput()
+                                                                                                                                                                                SoilLayerThinkness = getLayerThickness(NumberOfHRU = 173, NumberofLayer = 2)
+
+output_swr <- output_swr_layer_thickness(output_swr, start_year = year(start_date),
+                                                 SoilLayerThinkness = SoilLayerThinkness,NumberOfLayers =2)
+
+output_swr_percent = output_swr
+output_swr_percent$layer1 <- output_swr_percent$layer1/10
+output_swr_percent$layer2 <- output_swr_percent$layer2/output_swr_percent$`2`
+output_swr_percent$layer3 <- output_swr_percent$layer3/(output_swr_percent$`3` - output_swr_percent$`2`)
+output_swr_sum = output_swr_percent %>% group_by(date,SUB) %>% mutate(SUB_SM_layer1 = mean(layer1), SUB_SM_layer2 = mean(layer2), SUB_SM_layer3 = mean(layer3))
+output_swr_sum = output_swr_sum %>% select(SUB,date,SUB_SM_layer1,SUB_SM_layer2,SUB_SM_layer3) %>% unique()
+output_swr_watershed = output_swr_sum %>% group_by(date) %>% mutate(Basin_layer1 = mean(SUB_SM_layer1),Basin_layer2 = mean(SUB_SM_layer2),
+                                                                    Basin_layer3 = mean(SUB_SM_layer3)) %>% 
+  select(date,Basin_layer1,Basin_layer2,Basin_layer3) %>% unique
+
+
+smops_SM = read_csv("~/Stroubles_Watershed/CPSdata/smops_noaa/blended_SM_smops_strbls.csv")
+
+# read in TDR data
+TDR_SM = read_csv("~/Stroubles_Watershed/CPSdata/TDR/TDR_SM_data.csv")
+
+plot(smops_SM$date,smops_SM$SM, xlim=c(19400,19600), ylim=c(0.05,0.45), xlab = "Date",ylab="SM mm/mm")
+lines(output_swr_watershed$date,output_swr_watershed$Basin_layer1+0.13, col="blue")
+lines(output_swr_watershed$date,output_swr_watershed$Basin_layer2+0.13, col="red")
+lines(output_swr_watershed$date,output_swr_watershed$Basin_layer3+0.13, col="darkgreen")
+points(TDR_SM$TimeStamp,TDR_SM$med_trgt/100, col="red",pch=3)
+title(main = "Blue line is SWAT & Black dots are SMOPS")
+summary(output_swr_watershed )
